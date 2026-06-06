@@ -1,0 +1,40 @@
+    # ─── Environment ───────────────────────────────────────
+.env
+.env.local
+*.env
+
+# ─── Python ────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ─── Node.js (leftover from migration) ────────────────
+node_modules/
+package.json
+package-lock.json
+
+# ─── IDE / Editors ────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ─── Logs ─────────────────────────────────────────────
+*.log
+logs/
+
+# ─── OS ───────────────────────────────────────────────
+Thumbs.db
+.DS_Store
