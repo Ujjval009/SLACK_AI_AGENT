@@ -1,0 +1,614 @@
+================================================================================
+  SLACK AI AGENT — COMPLETE PROJECT DOCUMENTATION
+================================================================================
+
+  Company:     CloudNest Technologies
+  Product:     CloudNest Deploy (AI-powered Kubernetes autoscaling platform)
+  Stack:       Python + FastAPI + LangChain + Groq + Slack + PostgreSQL
+  Framework:   FastAPI (Python)
+  LLM:         Llama 3.3 70B Versatile (via Groq)
+  Database:    PostgreSQL (via SQLAlchemy + asyncpg)
+  Slack Mode:  Socket Mode (Events API via WebSocket)
+
+================================================================================
+TABLE OF CONTENTS
+================================================================================
+
+  1. PROJECT OVERVIEW
+  2. SYSTEM ARCHITECTURE
+  3. COMPLETE DATA PIPELINE (Step by Step)
+  4. PROJECT FILE STRUCTURE
+  5. FILE-BY-FILE EXPLANATION
+  6. ENVIRONMENT VARIABLES
+  7. HOW TO RUN
+  8. TESTING GUIDE
+  9. RENDER DEPLOYMENT
+  10. MIGRATION HISTORY (Node.js → Python)
+
+================================================================================
+1. PROJECT OVERVIEW
+================================================================================
+
+  This is a Slack AI Agent that automatically analyzes new members who join
+  a Slack workspace. When someone joins (via team_join or member_joined_channel
+  events), the agent:
+
+  1. Fetches their Slack profile (name, email, title, timezone)
+  2. Performs basic research:
+     - Visits their company website and scrapes the <title>
+     - Searches GitHub for their public profile
+  3. Sends the profile + research data to Groq's Llama 3.3 70B model
+  4. The LLM returns a JSON analysis with:
+     - fitScore (0-100): How likely they'd be interested in CloudNest Deploy
+     - insights: 3-5 key observations
+     - recommendations: 2-4 engagement suggestions
+  5. Saves the analysis to PostgreSQL
+  6. Posts a rich Slack message (with color-coded score) to a private channel
+
+  TECH STACK:
+  - FastAPI (async Python web framework)
+  - Uvicorn (ASGI server)
+  - LangChain (LLM orchestration)
+  - langchain-groq (Groq provider for LangChain)
+  - Slack SDK (Socket Mode client + Web API client)
+  - SQLAlchemy 2.0 (async ORM)
+  - asyncpg (async PostgreSQL driver)
+  - httpx (async HTTP client for research)
+  - Pydantic (validation & settings)
+  - python-dotenv (env file loading)
+
+================================================================================
+2. SYSTEM ARCHITECTURE
+================================================================================
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │                        SLACK WORKSPACE                                 │
+  │                                                                         │
+  │  ┌──────────────┐     ┌───────────────────┐                            │
+  │  │ team_join     │────▶│                   │                            │
+  │  │ event fires   │     │                   │                            │
+  │  └──────────────┘     │   Socket Mode     │    WebSocket (persistent)   │
+  │  ┌──────────────┐     │   Connection      │◄───────────────────────────│
+  │  │ member_joined │────▶│                   │                            │
+  │  │ _channel      │     │                   │                            │
+  │  └──────────────┘     └────────┬──────────┘                            │
+  └─────────────────────────────────┼──────────────────────────────────────┘
+                                    │
+                          Slack SDK │ SocketModeClient
+                          receives  │ event payload
+                                    ▼
+                      ┌─────────────────────────┐
+                      │   app/slack_client.py   │
+                      │                         │
+                      │  handle_socket_mode_    │
+                      │  request()              │
+                      │                         │
+                      │  Routes events to:      │
+                      │  • team_join handler    │
+                      │  • member_joined_channel│
+                      └─────────┬───────────────┘
+                                │
+                    ┌───────────┴───────────────┐
+                    │   analyze_and_post_member  │
+                    │   (main orchestrator)      │
+                    └───────────┬───────────────┘
+                                │
+              ┌─────────────────┼─────────────────┐
+              ▼                 ▼                  ▼
+  ┌───────────────────┐ ┌───────────────┐ ┌────────────────┐
+  │  app/research.py  │ │  app/llm.py  │ │ app/database.py│
+  │                   │ │              │ │                │
+  │  1. Get company   │ │ 1. Build     │ │ 1. Create      │
+  │     website info  │ │    prompt    │ │    tables      │
+  │  2. Search GitHub │ │ 2. Call Groq │ │ 2. Insert      │
+  │                   │ │    Llama     │ │    analysis    │
+  │  Uses httpx       │ │    3.3 70B   │ │ 3. Update sent │
+  └───────────────────┘ │ 3. Parse     │ │    status      │
+                         │    JSON      │ └────────────────┘
+                         └──────┬───────┘
+                                │
+                    ┌───────────┴───────────────┐
+                    │  app/slack_client.py      │
+                    │                           │
+                    │  post_analysis_to_channel │
+                    │  Rich Slack message with  │
+                    │  color-coded attachment   │
+                    └───────────┬───────────────┘
+                                │
+                                ▼
+                    ┌──────────────────────────┐
+                    │  SLACK PRIVATE CHANNEL   │
+                    │  Analysis visible to     │
+                    │  your team               │
+                    └──────────────────────────┘
+
+================================================================================
+3. COMPLETE DATA PIPELINE (Step by Step)
+================================================================================
+
+  EVENT TRIGGER
+  ─────────────
+  1. Slack workspace fires a 'team_join' or 'member_joined_channel' event
+  2. Socket Mode client (persistent WebSocket) receives it in real-time
+  3. handle_socket_mode_request() inspects the event type
+
+  PROFILE FETCH
+  ─────────────
+  4. get_user_info(user_id) calls Slack API:
+     - GET https://slack.com/api/users.info?user={id}
+     - Returns: name, email, title, timezone, profile fields
+  5. Maps Slack's raw response into a clean Pydantic MemberInfo
+
+  RESEARCH PHASE
+  ─────────────
+  6. do_basic_research(member_info) checks:
+     - Does member have a work email (not gmail/yahoo/etc)?
+     - If yes, extract domain from email
+
+  7. get_company_info(domain):
+     - HTTP GET https://www.{domain}
+     - Parse <title> tag with regex
+     - Returns: company name, URL
+
+  8. get_github_info(name):
+     - HTTP GET https://api.github.com/search/users?q={name}
+     - Take first result
+     - Returns: GitHub URL, public repo count
+
+  9. Research results collected as list[ResearchResult]
+
+  AI ANALYSIS
+  ───────────
+  10. analyze_with_ai(member_info, research_data):
+      - Builds a ChatPromptTemplate with:
+        • Company/Product context
+        • Member details (name, email, title)
+        • Research findings
+      - Chains: prompt | ChatGroq(model="llama-3.3-70b-versatile")
+      - Calls llm.ainvoke() with formatted variables
+      - Groq returns Llama 3.3 70B's response text
+      - Strips ```json markers, parses JSON
+
+  11. Parsed fields extracted:
+      - fitScore (clamped to 0-100)
+      - insights (list of strings)
+      - recommendations (list of strings)
+
+  DATABASE PERSISTENCE
+  ────────────────────
+  12. save_member_analysis():
+      - INSERT INTO member_analyses (member_id, member_name, member_email,
+        member_title, member_timezone, fit_score, insights, recommendations,
+        research_data) VALUES (...)
+      - Returns auto-generated ID
+
+  SLACK POSTING
+  ─────────────
+  13. _build_slack_blocks(member, analysis):
+      - Color-coded attachment:
+        • score >= 80 → green (#36a64f)
+        • score >= 60 → amber (#ffb84d)
+        • score >= 40 → orange (#ff9500)
+        • score < 40  → red   (#ff4444)
+      - Header: "🔍 New Member: {name}"
+      - Fields: Fit Score, Email, Title
+      - Section: Insights (bullet points)
+      - Section: Recommendations (bullet points)
+      - Footer: Timestamp
+
+  14. post_analysis_to_channel():
+      - POST https://slack.com/api/chat.postMessage
+      - Channel: SLACK_PRIVATE_CHANNEL_ID
+      - Payload: text + rich attachment blocks
+
+  15. mark_as_sent_to_slack():
+      - UPDATE member_analyses SET sent_to_slack = TRUE,
+        sent_to_slack_at = NOW(), updated_at = NOW() WHERE id = {id}
+
+  ERROR HANDLING
+  ──────────────
+  - If any step fails (research, LLM, Slack post), the error is logged
+  - The analysis record remains in DB (if saved before failure)
+  - Falls back to default analysis (fitScore: 50, manual review recommended)
+  - Graceful shutdown on SIGINT/SIGTERM
+
+================================================================================
+4. PROJECT FILE STRUCTURE
+================================================================================
+
+  /home/arise/projects/SLACK_AI_AGENT/
+  │
+  ├── app/                          # Main application package
+  │   ├── __init__.py               # Package marker (empty)
+  │   ├── main.py                   # FastAPI app entry, lifespan events
+  │   ├── config.py                 # Pydantic BaseSettings from .env
+  │   ├── database.py               # Async SQLAlchemy engine/session
+  │   ├── models.py                 # SQLAlchemy ORM models
+  │   ├── schemas.py                # Pydantic request/response schemas
+  │   ├── logger.py                 # Logging configuration
+  │   ├── llm.py                    # ChatGroq setup + analysis logic
+  │   ├── research.py               # Company + GitHub research logic
+  │   ├── slack_client.py           # Slack Socket Mode + WebClient
+  │   └── routers/                  # FastAPI route handlers
+  │       ├── __init__.py           # Package marker (empty)
+  │       ├── health.py             # GET /health endpoint
+  │       └── test.py               # POST /test/analyze-member (dev only)
+  │
+  ├── .env                          # Environment variables (secrets)
+  ├── .env.example                  # Template for .env
+  ├── requirements.txt              # Python dependencies
+  ├── runtime.txt                   # Python version for Render
+  ├── render.yaml                   # Render deployment config
+  ├── run.py                        # Entry script (python run.py)
+  └── COMPY.txt                     # This file
+
+================================================================================
+5. FILE-BY-FILE EXPLANATION
+================================================================================
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ app/__init__.py                                                         │
+  │ Package marker. Empty file. Makes 'app' a Python package.              │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ app/main.py                                                             │
+  │ Entry point of the FastAPI application.                                │
+  │                                                                         │
+  │ - Creates FastAPI app with lifespan handler                             │
+  │ - On startup: init_database() then start_socket_mode()                  │
+  │ - On shutdown: close Slack client then close database                   │
+  │ - Registers routers: health.py always, test.py only in dev              │
+  │ - Global exception handler returns 500 JSON                             │
+  │ - run() function called by run.py or 'uvicorn app.main:app'            │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ app/config.py                                                           │
+  │ Centralized configuration using Pydantic BaseSettings.                 │
+  │                                                                         │
+  │ Reads from .env file automatically. Fields:                            │
+  │ - SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, SLACK_APP_TOKEN               │
+  │ - SLACK_PRIVATE_CHANNEL_ID                                             │
+  │ - GROQ_API_KEY                                                          │
+  │ - DATABASE_URL                                                          │
+  │ - COMPANY_NAME, COMPANY_PRODUCT                                        │
+  │ - PORT, NODE_ENV                                                        │
+  │                                                                         │
+  │ Access: settings.slack_bot_token, settings.groq_api_key, etc.          │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ app/database.py                                                         │
+  │ Async SQLAlchemy setup.                                                │
+  │                                                                         │
+  │ - get_database_url(): Converts postgresql:// → postgresql+asyncpg://   │
+  │ - init_database(): Creates async engine, session factory, runs         │
+  │   Base.metadata.create_all() to create tables                           │
+  │ - get_session(): Async generator yields sessions for dependency inj.   │
+  │ - close_database(): Disposes engine on shutdown                        │
+  │ - Base: DeclarativeBase for ORM models                                 │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ app/models.py                                                           │
+  │ SQLAlchemy ORM model for the member_analyses table.                    │
+  │                                                                         │
+  │ Columns: id, member_id, member_name, member_email, member_title,       │
+  │ member_timezone, fit_score, insights (JSON), recommendations (JSON),   │
+  │ research_data (JSON), analyzed_at, sent_to_slack, sent_to_slack_at,    │
+  │ created_at, updated_at                                                  │
+  │                                                                         │
+  │ Indexes on: member_id, analyzed_at                                     │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ app/schemas.py                                                          │
+  │ Pydantic models for API request/response validation.                   │
+  │                                                                         │
+  │ - MemberInfo: Slack user profile data                                   │
+  │ - ResearchResult: Company/GitHub research finding                      │
+  │ - AnalysisResult: LLM output (fitScore, insights, recommendations)     │
+  │ - HealthResponse: /health endpoint response                            │
+  │ - TestAnalysisRequest/Response: Test endpoint schemas                  │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ app/logger.py                                                           │
+  │ Logging configuration using Python's built-in logging module.          │
+  │                                                                         │
+  │ - Logs to stdout with format: [LEVEL] message                          │
+  │ - DEBUG level in development, INFO in production                       │
+  │ - Exports: log.info(), log.error(), log.debug()                        │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ app/llm.py                                                              │
+  │ LangChain + Groq integration for AI analysis.                          │
+  │                                                                         │
+  │ - Creates ChatGroq instance with:                                      │
+  │   • model: "llama-3.3-70b-versatile"                                   │
+  │   • temperature: 0.3                                                    │
+  │   • apiKey: settings.groq_api_key                                      │
+  │ - Builds prompt template with company/product context                  │
+  │ - Calls chain.invoke() via LangChain expression language               │
+  │ - Strips markdown code fences from response                            │
+  │ - Parses JSON and returns AnalysisResult with safety defaults          │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ app/research.py                                                         │
+  │ External research functions using httpx (async HTTP client).           │
+  │                                                                         │
+  │ - is_personal_email(): Filter gmail/yahoo/hotmail/outlook/icloud       │
+  │ - get_company_info(domain): Fetch website, extract <title> tag         │
+  │ - get_github_info(name): Search GitHub users by name                   │
+  │ - do_basic_research(member_info): Orchestrates above functions         │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ app/slack_client.py                                                     │
+  │ Slack integration — both Socket Mode events and Web API calls.         │
+  │                                                                         │
+  │ - web_client: AsyncWebClient for Slack API calls                       │
+  │ - get_user_info(): users.info API → MemberInfo                         │
+  │ - save_member_analysis(): DB insert                                     │
+  │ - mark_as_sent_to_slack(): DB update                                    │
+  │ - _build_slack_blocks(): Construct rich Slack message attachments       │
+  │ - post_analysis_to_channel(): chat.postMessage API                      │
+  │ - analyze_and_post_member(): Main orchestrator (research → AI → DB →   │
+  │   Slack)                                                                │
+  │ - handle_socket_mode_request(): Routes Socket Mode events              │
+  │ - start_socket_mode(): Creates SocketModeClient and connects           │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ app/routers/__init__.py                                                 │
+  │ Package marker. Empty.                                                  │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ app/routers/health.py                                                   │
+  │ Health check endpoint.                                                  │
+  │                                                                         │
+  │ GET /health → { "status": "healthy", "timestamp": "..." }              │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ app/routers/test.py                                                     │
+  │ Development-only test endpoint (disabled in production).               │
+  │                                                                         │
+  │ POST /test/analyze-member → runs full AI pipeline without Slack/DB     │
+  │ Returns: { success, analysis (fitScore, insights, recommendations),    │
+  │   timestamp }                                                           │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ requirements.txt                                                        │
+  │ Python package dependencies for pip install.                            │
+  │                                                                         │
+  │ Contents: fastapi, uvicorn, pydantic, pydantic-settings, python-dotenv,│
+  │ slack-sdk, aiohttp, langchain-groq, langchain-core, sqlalchemy,        │
+  │ asyncpg, httpx, psycopg2-binary                                        │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ runtime.txt                                                             │
+  │ Specifies Python version for Render deployment: python-3.12            │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ render.yaml                                                             │
+  │ Render Blueprint deployment configuration.                             │
+  │                                                                         │
+  │ - Service type: web, runtime: python                                   │
+  │ - buildCommand: pip install -r requirements.txt                        │
+  │ - startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT       │
+  │ - All env vars marked as 'sync: false' (set manually in Render UI)     │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ run.py                                                                  │
+  │ Convenience entry point.                                                │
+  │ python run.py → calls app.main.run() → uvicorn.run()                   │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+================================================================================
+6. ENVIRONMENT VARIABLES
+================================================================================
+
+  Variable                     Required?     Description
+  ──────────────────────────── ──────────── ─────────────────────────────────
+  SLACK_BOT_TOKEN              YES           Bot OAuth token (xoxb-...)
+  SLACK_SIGNING_SECRET         YES           App signing secret
+  SLACK_APP_TOKEN              YES           App-level token (xapp-...)
+  SLACK_PRIVATE_CHANNEL_ID     YES           Channel ID where analysis posts
+  GROQ_API_KEY                 YES           Groq API key (gsk_...)
+  DATABASE_URL                 YES           PostgreSQL connection string
+  COMPANY_NAME                 NO            Your company name (for AI prompt)
+  COMPANY_PRODUCT              NO            Your product name (for AI prompt)
+  PORT                         NO            Server port (default: 8000)
+  NODE_ENV                     NO            'development' or 'production'
+
+  WHERE TO GET THEM:
+  ─────────────────
+  - Slack Tokens:     https://api.slack.com/apps → Your App → OAuth & Permissions
+  - Slack Channel ID: Right-click channel → Copy link → last part (C...)
+  - Groq API Key:     https://console.groq.com/keys
+  - Database URL:     From your PostgreSQL provider (Render, Neon, etc.)
+
+  EXAMPLE .env:
+  ──────────────
+  SLACK_BOT_TOKEN=xoxb-1234567890-abcdef
+  SLACK_SIGNING_SECRET=abcdef1234567890
+  SLACK_APP_TOKEN=xapp-1234567890-abcdef
+  SLACK_PRIVATE_CHANNEL_ID=C1234567890
+
+  GROQ_API_KEY=gsk_abcdef1234567890
+
+  DATABASE_URL=postgresql://user:pass@host:5432/dbname
+
+  COMPANY_NAME=CloudNest Technologies
+  COMPANY_PRODUCT=CloudNest Deploy
+
+  PORT=8000
+  NODE_ENV=development
+
+================================================================================
+7. HOW TO RUN
+================================================================================
+
+  PREREQUISITES:
+  - Python 3.12+
+  - PostgreSQL database (optional for testing without Slack)
+
+  STEP 1: Set up environment
+  ──────────────────────────
+  cp .env.example .env
+  # Edit .env with your actual secrets
+
+  STEP 2: Install dependencies
+  ────────────────────────────
+  pip install -r requirements.txt
+
+  STEP 3: Run the server
+  ──────────────────────
+  python run.py
+
+  # OR directly with uvicorn:
+  uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+  EXPECTED OUTPUT:
+  ────────────────
+  [INFO] Initializing database...
+  [INFO] Database schema initialized
+  [INFO] Starting Slack Socket Mode...
+  [INFO] ⚡️ Slack Socket Mode connected
+  [INFO] Slack AI Agent is running!
+
+  STOPPING:
+  ─────────
+  Press Ctrl+C → graceful shutdown:
+  [INFO] Shutting down...
+  [INFO] Stopped successfully
+
+================================================================================
+8. TESTING GUIDE
+================================================================================
+
+  TEST 1: Health Check
+  ────────────────────
+  curl http://localhost:8000/health
+
+  Expected:
+  {"status":"healthy","timestamp":"2026-06-06T07:00:00.000000+00:00"}
+
+  TEST 2: AI Analysis Pipeline (No Slack/DB required)
+  ────────────────────────────────────────────────────
+  curl -X POST http://localhost:8000/test/analyze-member \
+    -H "Content-Type: application/json" \
+    -d '{
+      "memberInfo": {
+        "name": "Jane Doe",
+        "email": "jane@google.com",
+        "title": "VP Engineering"
+      }
+    }'
+
+  Expected:
+  {"success":true,"analysis":{"fitScore":90,"insights":[...],"recommendations":[...]},"timestamp":"..."}
+
+  TEST 3: Full Live Flow (Requires Slack tokens)
+  ──────────────────────────────────────────────
+  1. Invite your bot to a public channel
+  2. Have a new user join the Slack workspace
+  3. Bot automatically posts analysis to SLACK_PRIVATE_CHANNEL_ID
+
+  TEST 4: Edge Cases
+  ──────────────────
+  - Personal email (jane@gmail.com) → AI uses limited research data
+  - No email provided → AI uses "Not provided"
+  - LLM returns bad JSON → Falls back to fitScore=50, manual review
+  - Research endpoint down → Continues with available data
+
+================================================================================
+9. RENDER DEPLOYMENT
+================================================================================
+
+  ONE-CLICK DEPLOYMENT:
+  ─────────────────────
+  render.yaml is pre-configured. Push your repo to GitHub and connect to
+  Render. It will auto-detect the Python service.
+
+  MANUAL DEPLOYMENT STEPS:
+  ────────────────────────
+  1. Push code to GitHub
+  2. In Render Dashboard → "New +" → "Blueprint"
+  3. Connect your repository
+  4. Render reads render.yaml and creates the service
+  5. Set all environment variables in Render's dashboard
+  6. Deploy
+
+  RENDER CONFIG (render.yaml):
+  ───────────────────────────
+  services:
+    - type: web
+      name: slack-ai-agent
+      runtime: python
+      buildCommand: pip install -r requirements.txt
+      startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+
+  IMPORTANT:
+  - Set all env vars in Render's dashboard (marked sync: false)
+  - Make sure DATABASE_URL has ?sslmode=require for Render's Postgres
+  - The start command uses $PORT which Render sets automatically
+
+================================================================================
+10. MIGRATION HISTORY (Node.js → Python)
+================================================================================
+
+  This project was originally written in Node.js/Express and migrated to
+  Python/FastAPI. Here is every change made:
+
+  ┌──────────────────────────┬──────────────────────────┬──────────────────┐
+  │ Node.js (Original)       │ Python (New)             │ Reason           │
+  ├──────────────────────────┼──────────────────────────┼──────────────────┤
+  │ Express                   │ FastAPI                  │ Async, modern,    │
+  │                           │                          │ auto-docs         │
+  ├──────────────────────────┼──────────────────────────┼──────────────────┤
+  │ Slack Bolt (Socket Mode)  │ Slack SDK SocketMode     │ More control,     │
+  │                           │ Client                   │ no framework lock │
+  ├──────────────────────────┼──────────────────────────┼──────────────────┤
+  │ ChatOpenAI (GPT-4)        │ ChatGroq (Llama 3.3 70B) │ OpenAI removed,   │
+  │                           │                          │ Groq is cheaper   │
+  ├──────────────────────────┼──────────────────────────┼──────────────────┤
+  │ pg (node-postgres)        │ SQLAlchemy + asyncpg     │ Async, ORM,      │
+  │                           │                          │ type safety       │
+  ├──────────────────────────┼──────────────────────────┼──────────────────┤
+  │ axios                     │ httpx                    │ Async native      │
+  ├──────────────────────────┼──────────────────────────┼──────────────────┤
+  │ dotenv                    │ pydantic-settings         │ Type-safe config  │
+  ├──────────────────────────┼──────────────────────────┼──────────────────┤
+  │ Express error middleware  │ FastAPI exception_handler │ Structured errors │
+  └──────────────────────────┴──────────────────────────┴──────────────────┘
+
+  FILES REMOVED:
+  - index.js            (main entry)
+  - db.js               (database module)
+  - package.json        (npm config)
+  - package-lock.json   (npm lock)
+  - node_modules/       (npm packages)
+  - README.md           (old readme)
+
+  FILES CREATED:
+  - app/__init__.py     app/main.py           app/config.py
+  - app/database.py     app/models.py         app/schemas.py
+  - app/logger.py       app/llm.py            app/research.py
+  - app/slack_client.py app/routers/__init__.py
+  - app/routers/health.py  app/routers/test.py
+  - requirements.txt    runtime.txt           render.yaml
+  - run.py              .env.example          COMPY.txt
+
+================================================================================
+END OF DOCUMENTATION
+================================================================================
