@@ -8,7 +8,7 @@ from app.logger import log
 from app.schemas import MemberInfo, ResearchResult, AnalysisResult
 from app.research import do_basic_research
 from app.llm import analyze_with_ai
-from app.database import AsyncSessionLocal
+from app import database
 from app.models import MemberAnalysis
 
 import json
@@ -43,7 +43,9 @@ async def save_member_analysis(
     analysis: AnalysisResult,
     research_data: list[ResearchResult],
 ) -> int:
-    async with AsyncSessionLocal() as session:
+    if database.AsyncSessionLocal is None:
+        raise RuntimeError("Database not initialized")
+    async with database.AsyncSessionLocal() as session:
         record = MemberAnalysis(
             member_id=member_info.id,
             member_name=member_info.name,
@@ -63,7 +65,9 @@ async def save_member_analysis(
 
 
 async def mark_as_sent_to_slack(analysis_id: int):
-    async with AsyncSessionLocal() as session:
+    if database.AsyncSessionLocal is None:
+        raise RuntimeError("Database not initialized")
+    async with database.AsyncSessionLocal() as session:
         record = await session.get(MemberAnalysis, analysis_id)
         if record:
             record.sent_to_slack = True
