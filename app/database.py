@@ -13,9 +13,14 @@ def get_database_url() -> str:
     url = settings.database_url
     if url.startswith("postgresql://"):
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
-    if "sslmode" not in url:
-        url += "&sslmode=require" if "?" in url else "?sslmode=require"
     return url
+
+
+def get_connect_args() -> dict:
+    url = settings.database_url
+    if "render.com" in url:
+        return {"ssl": "require"}
+    return {}
 
 
 async def init_database():
@@ -31,6 +36,7 @@ async def init_database():
         max_overflow=10,
         pool_pre_ping=True,
         pool_recycle=3600,
+        connect_args=get_connect_args(),
     )
 
     AsyncSessionLocal = async_sessionmaker(
