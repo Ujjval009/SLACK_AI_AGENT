@@ -181,9 +181,9 @@ async def handle_socket_mode_request(client: SocketModeClient, req: SocketModeRe
     elif event.get("type") == "member_joined_channel":
         try:
             channel_type = event.get("channel_type", "")
-            if channel_type == "C":
+            if channel_type in ("C", "G"):
                 user_id = event["user"]
-                log.info(f"Member {user_id} joined channel {event['channel']}")
+                log.info(f"Member {user_id} joined channel {event['channel']} ({channel_type})")
                 user_info = await get_user_info(user_id)
                 await analyze_and_post_member(user_info)
         except Exception as e:
