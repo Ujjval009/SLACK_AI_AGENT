@@ -21,12 +21,26 @@ async def lifespan(app: FastAPI):
     global slack_client
     try:
         log.info("Initializing database...")
-        await init_database()
+        try:
+            await init_database()
+            log.info("Database initialized successfully")
+        except Exception as e:
+            log.error(f"Database initialization failed: {e}")
+            log.error("App will run without database — Slack events will not be saved")
 
         log.info("Starting Slack Socket Mode...")
-        slack_client = await start_socket_mode()
+        try:
+            slack_client = await start_socket_mode()
+            log.info("⚡️ Slack Socket Mode connected")
+        except Exception as e:
+            log.error(f"Slack Socket Mode connection failed: {e}")
+            log.error("Check SLACK_APP_TOKEN and Socket Mode settings in Slack API dashboard")
 
-        log.info("Slack AI Agent is running!")
+        if slack_client:
+            log.info("✅ Slack AI Agent is fully running!")
+        else:
+            log.warning("⚠️ App started but Slack bot is not connected — check logs above")
+
         if settings.node_env == "development":
             log.info(f"Test endpoint: POST http://localhost:{settings.port}/test/analyze-member")
 
@@ -35,7 +49,10 @@ async def lifespan(app: FastAPI):
         log.info("Shutting down...")
         if slack_client:
             await slack_client.close()
-        await close_database()
+        try:
+            await close_database()
+        except Exception as e:
+            log.error(f"Database shutdown error: {e}")
         log.info("Stopped successfully")
 
 
