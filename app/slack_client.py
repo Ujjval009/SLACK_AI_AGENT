@@ -34,6 +34,12 @@ async def get_user_info(user_id: str) -> MemberInfo:
             "firstName": profile.get("first_name"),
             "lastName": profile.get("last_name"),
             "statusText": profile.get("status_text"),
+            "displayName": profile.get("display_name"),
+            "phone": profile.get("phone"),
+            "department": profile.get("department"),
+            "team": profile.get("team"),
+            "skype": profile.get("skype"),
+            "title": profile.get("title"),
         },
     )
 

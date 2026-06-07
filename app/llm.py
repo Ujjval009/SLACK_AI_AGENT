@@ -28,7 +28,7 @@ async def analyze_with_ai(
     research_data: list[ResearchResult],
 ) -> AnalysisResult:
     prompt = ChatPromptTemplate.from_template(
-        """Analyze this new community member for fit with our commercial product.
+        """Analyze this new community member for potential fit with our product.
 
 Company: {company}
 Product: {product}
@@ -41,12 +41,22 @@ Member:
 Research Data:
 {research}
 
-Provide a JSON response with:
-- fitScore (0-100): likelihood they'd be interested in our product
-- insights: array of 3-5 key observations
-- recommendations: array of 2-4 engagement suggestions
+Provide a JSON response:
+- fitScore (0-100): likelihood they might be interested in our product
+  * 70+ = strong signals they're a relevant fit
+  * 40-69 = some indicators, worth a conversation
+  * Below 40 = limited data or clear mismatch
+  * Default to 50 if you have minimal data — "unknown" is not "bad"
+- insights: array of 2-5 observations based on available information
+- suggestions: array of 2-4 engagement recommendations
 
-Consider job title, company size, technical background, and budget authority."""
+Do NOT penalize for:
+- Personal email addresses (Gmail, etc.) — many professionals use them
+- Missing job title — infer from available context
+- Limited web presence — many legitimate professionals have minimal online footprint
+
+Base your assessment on whatever signals are available. It's better to give
+a moderate score with honest uncertainty than a low score from lack of data."""
     )
 
     try:
@@ -65,6 +75,7 @@ Consider job title, company size, technical background, and budget authority."""
         cleaned = re.sub(r"```json\n?|```", "", response_text).strip()
         analysis = json.loads(cleaned)
 
+        recs = analysis.get("recommendations") or analysis.get("suggestions") or []
         return AnalysisResult(
             fitScore=max(0, min(100, analysis.get("fitScore", 50))),
             insights=(
@@ -73,8 +84,8 @@ Consider job title, company size, technical background, and budget authority."""
                 else ["Analysis completed"]
             ),
             recommendations=(
-                analysis["recommendations"]
-                if isinstance(analysis.get("recommendations"), list)
+                recs
+                if isinstance(recs, list)
                 else ["Follow up recommended"]
             ),
         )
