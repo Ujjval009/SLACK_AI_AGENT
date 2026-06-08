@@ -9,7 +9,7 @@ Built with **FastAPI**, **LangChain**, **Groq (Llama 3.3 70B)**, and **PostgreSQ
 ## Features
 
 - **Automatic Member Analysis** — When someone joins your Slack workspace or a specific channel, the agent instantly profiles them.
-- **Smart Research** — Fetches company website info and GitHub profile data automatically.
+- **Smart Research** — Extracts Slack profile fields (department, team, phone, skype, etc.) and optionally searches the web automatically.
 - **LLM-Powered Insights** — Uses Groq-hosted Llama 3.3 70B to score fit, generate observations, and suggest engagement strategies.
 - **Color-Coded Slack Reports** — Posts rich, color-coded messages (green/amber/orange/red) based on fit score.
 - **PostgreSQL Persistence** — Every analysis is stored for historical reference and reporting.
@@ -44,7 +44,7 @@ Slack Channel ◄─────────────────┘
 | LLM Toolkit  | LangChain (langchain-groq, langchain-core)      |
 | Slack SDK    | slack-sdk (Socket Mode + Web API)               |
 | Database     | PostgreSQL + SQLAlchemy (async) + asyncpg       |
-| HTTP Client  | httpx                                           |
+| HTTP Client  | httpx (DuckDuckGo search)                        |
 | Config       | Pydantic Settings + python-dotenv               |
 | Validation   | Pydantic                                        |
 
@@ -62,7 +62,7 @@ Slack Channel ◄─────────────────┘
 │   ├── schemas.py           # Pydantic request/response models
 │   ├── logger.py            # Logging configuration
 │   ├── llm.py               # ChatGroq setup & analysis chain
-│   ├── research.py          # Company website + GitHub research
+│   ├── research.py          # Slack profile fields + web search
 │   ├── slack_client.py      # Slack Socket Mode + Web API client
 │   └── routers/
 │       ├── health.py        # GET /health
@@ -177,9 +177,9 @@ Sample response:
 2. **Profile Fetch** — `slack_client.get_user_info()` calls Slack's `users.info` API to retrieve the member's name, email, title, and timezone.
 
 3. **Research Phase** — `research.do_basic_research()`:
-   - Skips personal email domains (gmail, yahoo, etc.)
-   - Visits the member's company website and extracts the `<title>` tag
-   - Searches GitHub for matching profiles
+   - Extracts Slack profile fields: department, team, phone, displayName, skype, statusText
+   - Optionally searches DuckDuckGo for the member's name and title
+   - Built with httpx (async HTTP client)
 
 4. **AI Analysis** — `llm.analyze_with_ai()`:
    - Builds a prompt with company context, member details, and research data

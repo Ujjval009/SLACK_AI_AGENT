@@ -1,0 +1,704 @@
+================================================================================
+  INTERVIEW PREPARATION GUIDE — SLACK AI AGENT
+  From Beginner to Advanced: Everything You Need to Know
+================================================================================
+
+Why: To automatically qualify and understand new Slack workspace members — their role, 
+department, team, and potential interest in your product — so you can engage the right people 
+without manual research.
+
+Detect new members joining the workspace (team_join) or a channel (member_joined_channel)
+Extract their Slack profile: name, email, title, timezone, department, team, phone, skype, display name, status
+Optionally search DuckDuckGo for their name + title
+Analyze everything via Groq's Llama 3.3 70B — returns a fit score (0–100), insights, and engagement suggestions
+Save analysis to PostgreSQL
+Post a color-coded Slack message to a private channel
+
+
+What it could do with more work:
+- Send welcome DMs to new members
+- Post to different channels based on score/department
+- CRM integration (HubSpot, Salesforce) — auto-create leads for high-fit members
+- Weekly summary of all analyzed members
+- Admin dashboard to view historical analyses
+- Custom Slack commands (/analyze @user)
+- Multi-workspace support
+
+
+  TABLE OF CONTENTS
+  ─────────────────
+  1. PROJECT OVERVIEW (Basic)
+  2. STEP-BY-STEP PIPELINE (Intermediate)
+  3. ARCHITECTURE DEEP DIVE (Advanced)
+  4. CODE WALKTHROUGH — Every File Explained
+  5. DESIGN DECISIONS — Why Each Choice Was Made
+  6. INTERVIEW QUESTIONS & ANSWERS
+  7. SYSTEM DESIGN (Whiteboard Questions)
+  8. WHAT-IF SCENARIOS
+  9. KEYWORDS & PHRASES TO USE
+
+
+================================================================================
+1. PROJECT OVERVIEW (Basic — Start Here)
+================================================================================
+
+  WHAT IS THIS PROJECT?
+  ─────────────────────
+   A Slack bot that automatically analyzes new members when they join a
+   Slack workspace. It extracts their Slack profile fields (department,
+   team, phone, etc.), optionally searches the web, sends the data to an
+   AI (Llama 3.3 70B), and posts a color-coded analysis with fit score
+   and recommendations to a private channel.
+
+  WHO IS IT FOR?
+  ──────────────
+  Sales teams, community managers, HR teams — anyone who wants to know
+  "who just joined and should we talk to them?"
+
+  WHAT DOES IT DO IN ONE SENTENCE?
+  ────────────────────────────────
+  "A FastAPI-based Slack bot that uses LangChain and Groq's Llama 3.3 70B
+  to automatically research and analyze new workspace members, scoring
+  their potential fit for your product."
+
+  TECH STACK (Memorize This)
+  ──────────────────────────
+  - FastAPI (async Python web framework)
+  - Uvicorn (ASGI server)
+  - LangChain + langchain-groq (LLM orchestration)
+  - Groq (Llama 3.3 70B — LLM inference)
+  - Slack SDK (Socket Mode + Web API)
+  - SQLAlchemy 2.0 (async ORM)
+  - asyncpg (postgres driver)
+  - httpx (async HTTP for web search)
+  - Pydantic (validation)
+  - Render (deployment)
+
+
+================================================================================
+2. STEP-BY-STEP PIPELINE (Intermediate — Be Able to Explain This Fluently)
+================================================================================
+
+  EVENT FLOW (Memorize This Sequence)
+  ───────────────────────────────────
+
+  Step 1: Slack sends an event via Socket Mode WebSocket
+  ───────
+  - Event types: team_join (new member) or member_joined_channel
+  - Socket Mode uses a persistent WebSocket connection (no HTTP endpoints)
+  - The event payload contains the user data
+
+  Step 2: Event handler routes the event
+  ───────
+  - handle_socket_mode_request() checks event type
+  - Routes to team_join handler OR member_joined_channel handler
+
+  Step 3: Fetch Slack profile
+  ───────
+  - Calls Slack API: users.info(user_id)
+  - Returns: name, email, title, timezone, profile fields
+  - Mapped into a Pydantic MemberInfo schema
+
+   Step 4: Research phase
+   ───────
+   - do_basic_research() extracts Slack profile fields:
+     - department, team, phone, displayName, skype, statusText, timezone
+   - Optionally searches DuckDuckGo for "{name} {title}"
+   - Returns profile insights + optional web result
+   - Does NOT filter personal emails or scrape company websites/GitHub
+
+   Step 5: AI Analysis
+   ───────
+   - Builds a prompt with: company context + member details + research data
+   - Prompt explicitly says: do NOT penalize personal emails, missing titles,
+     or limited web presence; default to score 50 when data is minimal
+   - Calls ChatGroq (model: "llama-3.3-70b-versatile", temperature: 0.3)
+   - LLM returns JSON with: fitScore (0-100), insights[], suggestions[]
+   - Parses and validates the JSON, with fallback defaults on failure
+
+  Step 6: Save to Database
+  ───────
+  - INSERT into member_analyses table
+  - Columns: member_id, name, email, title, fit_score, insights (JSON),
+    recommendations (JSON), research_data (JSON), timestamps
+
+  Step 7: Post to Slack
+  ───────
+  - Builds a rich Slack message with color-coded attachment:
+    - Green (#36a64f) for score >= 80
+    - Amber (#ffb84d) for score >= 60
+    - Orange (#ff9500) for score >= 40
+    - Red (#ff4444) for score < 40
+  - Posts to SLACK_PRIVATE_CHANNEL_ID via chat.postMessage API
+
+  Step 8: Mark as sent
+  ───────
+  - UPDATE member_analyses SET sent_to_slack = TRUE
+
+  TOTAL TIME: ~3-5 seconds per member
+
+
+================================================================================
+3. ARCHITECTURE DEEP DIVE (Advanced — For Senior/Principal Interviews)
+================================================================================
+
+  SYSTEM COMPONENTS
+  ─────────────────
+
+  ┌──────────────┐     Socket Mode     ┌──────────────────────┐
+  │    Slack     │◄───────────────────►│   FastAPI Server      │
+  │  Workspace   │   WebSocket         │   (Uvicorn)           │
+  │              │                     │                       │
+  │              │                     │  ┌─────────────────┐  │
+  │              │                     │  │  slack_client.py │  │
+  │              │                     │  │  (Event Router)  │  │
+  │              │                     │  └────────┬────────┘  │
+  └──────────────┘                     │           │           │
+                                       │     ┌─────┴─────┐     │
+                                       │     │           │     │
+                                       │  ┌──▼──┐   ┌───▼──┐  │
+                                       │  │LLM  │   │Research│  │
+                                       │  │.py  │   │.py    │  │
+                                       │  └──┬──┘   └───┬──┘  │
+                                       │     │           │     │
+                                       │     └─────┬─────┘    │
+                                       │           │           │
+                                       │     ┌─────▼─────┐    │
+                                       │     │ database  │    │
+                                       │     │ .py       │    │
+                                       │     └─────┬─────┘    │
+                                       │           │           │
+                                       └───────────┼───────────┘
+                                                   │
+                                           ┌───────▼───────┐
+                                           │  PostgreSQL   │
+                                           │  (asyncpg)    │
+                                           └───────────────┘
+
+  ASYNC FLOW
+  ──────────
+  Every I/O operation is async:
+  - Slack API calls: await web_client.users_info()
+  - HTTP research: await client.get()
+  - LLM inference: await chain.ainvoke()
+  - Database: await session.commit()
+  - This means ONE event can be processed while waiting for another's I/O
+
+  ERROR HANDLING STRATEGY
+  ───────────────────────
+  - Each step has its own try/except
+  - LLM failure → returns default analysis (fitScore: 50, manual review)
+   - Research failure → continues with available data
+  - Database failure → returns 500, doesn't crash the bot
+  - Socket Mode timeout → auto-reconnects
+
+  DEPLOYMENT ARCHITECTURE
+  ───────────────────────
+  - Single Python process (Uvicorn)
+  - One worker (WEB_CONCURRENCY=1 on Render free tier)
+  - In-memory state (no horizontal scaling needed for this use case)
+  - Socket Mode client runs in the same process as the HTTP server
+
+
+================================================================================
+4. CODE WALKTHROUGH — Every File Explained (For Deep Technical Questions)
+================================================================================
+
+  ┌─────────────────────────────────────────────────────────────────────────────┐
+  │ app/main.py                                                                 │
+  │                                                                             │
+  │ PURPOSE: Application entry point                                            │
+  │                                                                             │
+  │ - Creates FastAPI instance                                                  │
+  │ - Defines lifespan() context manager:                                       │
+  │     * Startup: init_database() → start_socket_mode()                       │
+  │     * Shutdown: close socket → close database                               │
+  │ - Registers routers (health always, test only in dev)                       │
+  │ - Global exception handler catches unhandled errors                         │
+  │ - run() function starts uvicorn                                             │
+  │                                                                             │
+  │ KEY INTERVIEW POINT: "FastAPI's lifespan context manager ensures proper     │
+  │ lifecycle management — database and Slack connections are initialized       │
+  │ before serving requests and cleaned up on shutdown."                        │
+  └─────────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────────┐
+  │ app/config.py                                                               │
+  │                                                                             │
+  │ PURPOSE: Centralized configuration                                          │
+  │                                                                             │
+  │ - Uses Pydantic BaseSettings                                                │
+  │ - Reads from .env file or environment variables                             │
+  │ - All settings have defaults where safe                                     │
+  │ - model_config = {"env_file": ".env"}                                       │
+  │                                                                             │
+  │ KEY INTERVIEW POINT: "Pydantic Settings provides type-safe configuration    │
+  │ with automatic validation. If a required env var is missing, the app fails  │
+  │ fast at startup instead of failing mysteriously at runtime."                │
+  └─────────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────────┐
+  │ app/database.py                                                             │
+  │                                                                             │
+  │ PURPOSE: Async database engine and session management                       │
+  │                                                                             │
+  │ - get_database_url(): Converts postgresql:// to postgresql+asyncpg://       │
+  │ - get_connect_args(): Detects Render's host and adds SSL config             │
+  │ - init_database(): Creates engine, session factory, runs migrations         │
+  │ - close_database(): Cleanly disposes engine                                 │
+  │ - Base: DeclarativeBase for all ORM models                                  │
+  │                                                                             │
+  │ KEY INTERVIEW POINT: "I chose asyncpg over psycopg2 because FastAPI is      │
+  │ fully async. Sync database calls would block the event loop. asyncpg is     │
+  │ the fastest async postgres driver for Python."                              │
+  └─────────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────────┐
+  │ app/models.py                                                               │
+  │                                                                             │
+  │ PURPOSE: SQLAlchemy ORM model                                               │
+  │                                                                             │
+  │ - MemberAnalysis table with all relevant columns                            │
+  │ - JSON columns for insights, recommendations, research_data                 │
+  │ - Indexed on member_id and analyzed_at                                      │
+  │ - Automatic timestamps via server_default                                   │
+  │                                                                             │
+  │ KEY INTERVIEW POINT: "JSON columns allow flexible schema-less storage for   │
+  │ LLM outputs which can vary in structure."                                  │
+  └─────────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────────┐
+  │ app/schemas.py                                                              │
+  │                                                                             │
+  │ PURPOSE: Pydantic models for API request/response validation               │
+  │                                                                             │
+  │ - MemberInfo: Validates Slack user profile                                  │
+  │ - AnalysisResult: Ensures LLM output has required fields                    │
+  │ - ResearchResult: Validates company/GitHub findings                         │
+  │                                                                             │
+  │ KEY INTERVIEW POINT: "Pydantic schemas serve dual purpose — input           │
+  │ validation for API requests AND output serialization for API responses."   │
+  └─────────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────────┐
+  │ app/llm.py                                                                  │
+  │                                                                             │
+  │ PURPOSE: LangChain + Groq LLM integration                                  │
+  │                                                                             │
+  │ - Creates ChatGroq instance with model="llama-3.3-70b-versatile"            │
+  │ - Builds a ChatPromptTemplate with company context                          │
+  │ - Uses LangChain Expression Language (LCEL): chain = prompt | llm           │
+  │ - Calls chain.ainvoke() for async execution                                 │
+  │ - Strips markdown code fences and parses JSON                               │
+  │ - Returns AnalysisResult with safe defaults on failure                     │
+  │                                                                             │
+  │ KEY INTERVIEW POINT: "LangChain provides a clean abstraction layer. If      │
+  │ I need to switch models (e.g., to GPT-4 or Claude), I only change the      │
+  │ model name — the prompt chain stays the same."                              │
+  └─────────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────────┐
+   │ app/research.py                                                             │
+   │                                                                             │
+   │ PURPOSE: Slack profile field extraction + web search                       │
+   │                                                                             │
+   │ - _get_profile_insights(): Builds insights from Slack profile fields        │
+   │   (department, team, phone, displayName, skype, statusText, timezone)      │
+   │ - _search_web(): Async DuckDuckGo search via httpx                         │
+   │ - All functions return None on failure (graceful degradation)              │
+   │                                                                             │
+   │ KEY INTERVIEW POINT: "Replaced company/GitHub scraping with Slack profile   │
+   │ fields — more reliable signals from employer-verified data."               │
+  └─────────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────────┐
+  │ app/slack_client.py                                                         │
+  │                                                                             │
+  │ PURPOSE: Slack integration — this is where everything connects              │
+  │                                                                             │
+  │ - AsyncWebClient: For Slack API calls (users.info, chat.postMessage)        │
+  │ - SocketModeClient: For receiving events via WebSocket                      │
+  │ - get_user_info(): users.info API → MemberInfo                              │
+  │ - save_member_analysis(): DB insert                                         │
+  │ - mark_as_sent_to_slack(): DB update                                        │
+  │ - _build_slack_blocks(): Rich Slack message builder                         │
+  │ - post_analysis_to_channel(): Posts to Slack                                │
+  │ - analyze_and_post_member(): The MAIN orchestrator function                 │
+  │ - handle_socket_mode_request(): Event router                                │
+  │ - start_socket_mode(): Creates and connects SocketModeClient                │
+  │                                                                             │
+  │ KEY INTERVIEW POINT: "This is the orchestrator. It coordinates research,    │
+  │ AI analysis, database, and Slack posting in the right order with proper     │
+  │ error handling at each step."                                               │
+  └─────────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────────────┐
+  │ app/logger.py                                                               │
+  │                                                                             │
+  │ PURPOSE: Logging configuration                                              │
+  │                                                                             │
+  │ - Logs to stdout with [LEVEL] prefix                                        │
+  │ - DEBUG in development, INFO in production                                  │
+  │ - Single shared logger instance across all modules                          │
+  └─────────────────────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+5. DESIGN DECISIONS — Why Each Choice Was Made (For "Why Not X?" Questions)
+================================================================================
+
+  DECISION 1: FastAPI instead of Express (Node.js) or Flask
+  ───────────
+  WHY: Original project was in Node.js/Express. I migrated to Python.
+  REASONS:
+  - Express served the project well, but Python has better LLM ecosystem
+  - FastAPI is async-native, Express 5 is sync-based
+  - Pydantic validation + auto docs = less boilerplate
+  - LangChain has first-class Python support
+
+  DECISION 2: Groq instead of OpenAI
+  ───────────
+  WHY: Original used OpenAI GPT-4. I switched to Groq's Llama 3.3 70B.
+  REASONS:
+  - OpenAI API costs ~$0.03 per analysis, Groq is ~$0.0002 (150x cheaper)
+  - Groq's LPU hardware delivers ~200 tok/s vs OpenAI's ~50 tok/s
+  - Llama 3.3 70B is competitive with GPT-4 on reasoning tasks
+  - No vendor lock-in — can swap back anytime since LangChain abstracts it
+
+  DECISION 3: Socket Mode instead of HTTP Events API
+  ───────────
+  WHY: Socket Mode uses WebSocket instead of public HTTP endpoint.
+  REASONS:
+  - No need for public HTTPS URL (works locally with no ngrok)
+  - No SSL certificate management
+  - Simpler deployment on Render (no custom domain)
+  - Persistent connection = lower latency
+
+  DECISION 4: asyncpg instead of psycopg2
+  ───────────
+  WHY: Database driver choice.
+  REASONS:
+  - FastAPI is fully async — sync DB calls would block the event loop
+  - asyncpg is the fastest PostgreSQL driver for Python
+  - Native async/await support
+  - psycopg2 requires threading workarounds in async apps
+
+  DECISION 5: SQLAlchemy instead of raw SQL
+  ───────────
+  WHY: ORM choice.
+  REASONS:
+  - Type safety with Python types mapping to DB types
+  - Migration support (can add Alembic later)
+  - Less boilerplate than raw SQL
+  - SQL injection protection by default
+
+   DECISION 6: httpx instead of requests
+   ───────────
+   WHY: HTTP client choice.
+   REASONS:
+   - Native async support (requests is sync-only)
+   - Same API for sync and async
+   - Better connection pooling
+
+   DECISION 9: Slack profile fields over external research
+   ────────────
+   WHY: Replaced company website scraping and GitHub search.
+   REASONS:
+   - Company website irrelevant for non-sales roles (engineers, designers)
+   - GitHub presence is poor signal — many professionals don't use it
+   - Slack custom fields (department, team, phone) are employer-verified
+   - DuckDuckGo provides a lightweight fallback without API keys
+   - Removed personal email penalization — Gmail is legitimate for pros
+
+  DECISION 7: Render instead of Railway/Railway
+  ───────────
+  WHY: Deployment platform.
+  REASONS:
+  - Free tier with PostgreSQL included
+  - Auto-deploy from GitHub
+  - Python/uvicorn support out of the box
+  - Simple environment variable management
+
+  DECISION 8: Pydantic v2 instead of v1
+  ───────────
+  WHY: Validation library.
+  REASONS:
+  - 5-50x faster than Pydantic v1
+  - Better JSON schema generation
+  - Stricter validation by default
+
+
+================================================================================
+6. INTERVIEW QUESTIONS & ANSWERS (Memorize These)
+================================================================================
+
+  ──────────────────────────────────────────────────────────────────────────
+  Q1: "Explain this project in 30 seconds."
+  A:  "It's a Slack bot that automatically analyzes new members when they
+      join a workspace. It researches their company and GitHub, sends the
+      data to an LLM (Llama 3.3 70B via Groq), and posts a color-coded
+      analysis with a fit score, insights, and recommendations to a
+      private Slack channel. Built with FastAPI, LangChain, and PostgreSQL."
+
+  ──────────────────────────────────────────────────────────────────────────
+  Q2: "What problem does it solve?"
+  A:  "When someone joins your Slack workspace, you have no idea who they
+      are or whether they're a potential customer. Manually researching
+      takes 10-15 minutes per person. This bot does it in 3-5 seconds
+      automatically and consistently."
+
+  ──────────────────────────────────────────────────────────────────────────
+  Q3: "How does the AI analysis work?"
+  A:  "I use LangChain to build a prompt template that includes the company
+      context, member details, and research data. The prompt instructs the
+      LLM to return JSON with a fitScore (0-100), insights array, and
+      recommendations array. The LLM response is parsed, validated, and
+      if parsing fails, we fall back to defaults."
+
+  ──────────────────────────────────────────────────────────────────────────
+  Q4: "Why did you choose Groq over OpenAI?"
+  A:  "Three reasons: speed, cost, and flexibility. Groq's Llama 3.3 70B
+      runs on custom LPU hardware that gives ~200 tokens/second compared to
+      ~50 on GPT-4. It's also about 150x cheaper per analysis. And since
+      I'm using LangChain, I can switch models with a single line change."
+
+  ──────────────────────────────────────────────────────────────────────────
+  Q5: "What happens if the LLM call fails?"
+  A:  "The try/except catches it and returns a default analysis with
+      fitScore=50, insights=['Unable to complete full analysis'], and
+      recommendations=['Manual review recommended']. The error is logged
+      and the bot continues running — it never crashes from an LLM failure."
+
+  ──────────────────────────────────────────────────────────────────────────
+  Q6: "How does Socket Mode work vs HTTP Events?"
+  A:  "Socket Mode establishes a persistent WebSocket connection between
+      your app and Slack. Events are pushed through this connection instead
+      of Slack calling your HTTP endpoint. This means you don't need a
+      public URL, SSL certificate, or ngrok for local development."
+
+  ──────────────────────────────────────────────────────────────────────────
+  Q7: "How would you scale this?"
+  A:  "For high-volume workspaces, I'd add a message queue (Redis/RabbitMQ)
+      between the event handler and the processing pipeline. The Socket Mode
+      client receives events and pushes them to a queue, while worker
+      processes pick up tasks. This prevents backpressure if multiple users
+      join simultaneously."
+
+  ──────────────────────────────────────────────────────────────────────────
+  Q8: "How do you handle database connections?"
+  A:  "I use SQLAlchemy's async engine with a connection pool (20 pool size,
+      10 overflow). The pool is created once at startup in the lifespan
+      handler and disposed on shutdown. Each request uses a session from
+      the pool via async context manager, ensuring proper cleanup."
+
+  ──────────────────────────────────────────────────────────────────────────
+  Q9: "What's the biggest challenge you faced?"
+  A:  "The migration from Node.js to Python. The original Express/Slack Bolt
+      code used synchronous patterns. I had to redesign everything for
+      async Python — replacing axios with httpx, pg with asyncpg, and
+      Express middleware with FastAPI's lifespan and exception handlers."
+
+  ──────────────────────────────────────────────────────────────────────────
+  Q10: "What would you add next?"
+  A:  "Three features: 1) Web search integration for deeper research beyond
+      company websites, 2) A dashboard to view all analyzed members and
+      trends over time, 3) Multi-model comparison — analyze with Groq,
+      OpenAI, and Claude to compare results."
+
+
+================================================================================
+7. SYSTEM DESIGN (Whiteboard Questions)
+================================================================================
+
+  SCENARIO: "Design a system that analyzes 10,000 Slack workspace joins per day."
+
+  ──────────────────────────────────────────────────────────────────────────
+  Current Bottlenecks:
+  ──────────────────────────────────────────────────────────────────────────
+  1. Single-process Uvicorn (one worker) — sees all events sequentially
+  2. In-memory state — lost on restart
+  3. Direct Slack API calls — rate limited at ~1 req/sec on free tier
+
+  ──────────────────────────────────────────────────────────────────────────
+  Proposed Architecture:
+  ──────────────────────────────────────────────────────────────────────────
+
+           Slack
+            │
+            ▼ Socket Mode
+    ┌───────────────┐
+    │ Event Ingestion│
+    │ (FastAPI)      │
+    └───────┬───────┘
+            │ Push event
+            ▼
+    ┌───────────────┐
+    │   Redis Queue  │  ← Handles backpressure
+    │   (Bull/RSMQ)  │     decouples ingestion from processing
+    └───────┬───────┘
+            │ Pop task
+            ▼
+    ┌───────────────┐
+    │   Worker Pool  │  ← Multiple workers (4-8)
+    │  (Celery/Dram) │     process in parallel
+    ├───────────────┤
+    │ Worker 1       │
+    │ Worker 2       │
+    │ Worker 3       │
+    │ Worker N       │
+    └───────┬───────┘
+            │
+      ┌─────┼─────┐
+      ▼     ▼     ▼
+   ┌────┐ ┌────┐ ┌────┐
+   │Research│ │LLM│ │ DB │
+   └────┘ └────┘ └────┘
+
+  ──────────────────────────────────────────────────────────────────────────
+  Changes Needed:
+  ──────────────────────────────────────────────────────────────────────────
+  1. Add Redis for task queue
+  2. Replace single Uvicorn worker with multiple workers or Celery
+  3. Add rate limiting middleware for Slack API calls
+  4. Use connection pooling for PostgreSQL (already done)
+  5. Add health monitoring and alerting
+  6. Implement idempotency (don't analyze the same user twice)
+
+  ──────────────────────────────────────────────────────────────────────────
+  Estimated Throughput:
+  ──────────────────────────────────────────────────────────────────────────
+  - Current: ~1 analysis every 5 seconds → ~17,280/day
+  - With 4 workers: ~4 analyses every 5 seconds → ~69,120/day
+  - With queue + 8 workers: ~80,000/day (bottleneck becomes Slack API rate limit)
+
+
+================================================================================
+8. WHAT-IF SCENARIOS (For Behavioral/Scenario Questions)
+================================================================================
+
+  SCENARIO 1: "What if Slack changes their API?"
+  ───────────
+  RESPONSE: "I'd check their changelog, update the SDK version in
+  requirements.txt, deploy. The slack-sdk library handles version
+  compatibility. Worst case, I'd update the affected API calls."
+
+  SCENARIO 2: "What if the AI starts returning bad analysis?"
+  ───────────
+  RESPONSE: "First, I'd add logging to capture raw LLM responses. Then
+  I'd refine the prompt — more specific instructions, better examples.
+  I could also add output validation to reject low-quality responses
+  and retry with a lower temperature."
+
+  SCENARIO 3: "What if the database goes down?"
+  ───────────
+  RESPONSE: "The bot should still work — it just won't save analyses.
+  I'd add a retry mechanism with exponential backoff, and a health check
+  endpoint that reports database status. The app would log warnings and
+  continue processing (research + AI + Slack post)."
+
+   SCENARIO 4: "What if a user has no Slack profile details?"
+   ───────────
+   RESPONSE: "The research phase handles this gracefully. _get_profile_insights
+   returns an empty list, web search may come back empty. The LLM receives
+   'Limited research data available' and defaults to score 50 — 'unknown'
+   is treated as neutral, not negative."
+
+  SCENARIO 5: "What if someone joins who shouldn't be analyzed?"
+  ───────────
+  RESPONSE: "I'd add a blocklist feature. A list of excluded email domains
+  or user IDs that the bot skips. This could be an env var or a database
+  table with an API to manage it."
+
+
+================================================================================
+9. KEYWORDS & PHRASES TO USE (Scoring Points in Interviews)
+================================================================================
+
+  When describing the project, use these phrases naturally:
+
+  ARCHITECTURE:
+  ─────────────
+  "Event-driven architecture"
+  "Orchestration pattern" (bot coordinates multiple services)
+  "Async I/O throughout the stack"
+  "Graceful degradation" (failures don't crash the bot)
+  "Separation of concerns" (one file per responsibility)
+  "Defensive programming" (try/except at every step)
+
+  FASTAPI:
+  ────────
+  "ASGI server" (Uvicorn)
+  "Lifespan context manager" (startup/shutdown lifecycle)
+  "Dependency injection" (get_session generator)
+  "Pydantic validation" (auto request/response validation)
+
+  LLM:
+  ────
+  "LangChain Expression Language (LCEL)" (prompt | llm)
+  "Structured output parsing" (JSON from LLM)
+  "Few-shot prompting" (prompt template)
+  "Prompt engineering"
+
+  DATABASE:
+  ─────────
+  "Connection pooling" (pool_size=20)
+  "Async ORM" (SQLAlchemy 2.0 async)
+  "Type-safe queries" (Pydantic + SQLAlchemy)
+  "Migration-ready" (can add Alembic)
+
+  GENERAL:
+  ────────
+  "Production-ready" (error handling, logging, graceful shutdown)
+  "Self-documenting API" (FastAPI's auto-generated OpenAPI docs)
+  "Cloud-native" (deployed on Render, env var config)
+  "Observability" (structured logging)
+
+  Things interviewers love to hear:
+  - "I considered the trade-offs"
+  - "I handled edge cases"
+  - "I designed for failure"
+  - "I kept it modular so it's easy to change"
+  - "I used libraries that are well-maintained and popular"
+
+
+================================================================================
+QUICK REFERENCE CARD (Print This)
+================================================================================
+
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │                           QUICK CARD                                │
+  ├─────────────────────────────────────────────────────────────────────┤
+  │ Tech:     FastAPI + LangChain + Groq (Llama 3.3 70B)               │
+  │           + Slack SDK + SQLAlchemy + asyncpg + httpx                │
+  ├─────────────────────────────────────────────────────────────────────┤
+  │ Events:   team_join, member_joined_channel                         │
+  ├─────────────────────────────────────────────────────────────────────┤
+  │ Pipeline: Join → Profile → Research → AI → DB → Slack Post         │
+  ├─────────────────────────────────────────────────────────────────────┤
+  │ Ports:    8000 (dev), $PORT (Render)                                │
+  ├─────────────────────────────────────────────────────────────────────┤
+  │ Start:    uvicorn app.main:app --host 0.0.0.0 --port $PORT        │
+  ├─────────────────────────────────────────────────────────────────────┤
+  │ DB:       PostgreSQL (Render), SSL required, asyncpg driver        │
+  ├─────────────────────────────────────────────────────────────────────┤
+  │ Slack:    Socket Mode (WebSocket), no public URL needed            │
+  ├─────────────────────────────────────────────────────────────────────┤
+  │ Colors:   >=80 Green, >=60 Amber, >=40 Orange, <40 Red            │
+  ├─────────────────────────────────────────────────────────────────────┤
+  │ Failures: LLM fails → default score. DB fails → log & continue    │
+  ├─────────────────────────────────────────────────────────────────────┤
+  │ Files:    main.py → entry                                          │
+  │           config.py → env vars                                     │
+  │           database.py → engine/session                             │
+  │           models.py → ORM table                                    │
+  │           schemas.py → validation                                  │
+  │           llm.py → ChatGroq + prompt                               │
+  │           research.py → company/GitHub lookup                      │
+  │           slack_client.py → orchestrator + events                  │
+  │           logger.py → logging                                      │
+  └─────────────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+END OF INTERVIEW PREPARATION GUIDE
+================================================================================
