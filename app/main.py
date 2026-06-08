@@ -10,7 +10,7 @@ from app.config import settings
 from app.logger import log
 from app.database import init_database, close_database
 from app.slack_client import start_socket_mode
-from app.routers import health, test
+from app.routers import health, members, test
 
 
 slack_client = None
@@ -63,6 +63,7 @@ app = FastAPI(
 )
 
 app.include_router(health.router)
+app.include_router(members.router)
 
 if settings.node_env == "development":
     app.include_router(test.router)

@@ -30,6 +30,17 @@ class HealthResponse(BaseModel):
     timestamp: str
 
 
+class UpdateTitleRequest(BaseModel):
+    title: str
+
+
+class MemberUpdateResponse(BaseModel):
+    success: bool
+    message: str
+    member_id: str
+    title: str
+
+
 class TestAnalysisRequest(BaseModel):
     memberInfo: MemberInfo
 
