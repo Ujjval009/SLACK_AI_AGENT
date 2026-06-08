@@ -13,9 +13,26 @@ from app.models import MemberAnalysis
 
 import json
 import datetime
+import asyncio
 
 
 web_client = AsyncWebClient(token=settings.slack_bot_token)
+
+_recently_analyzed: dict[str, float] = {}
+_DEDUP_WINDOW_SECONDS = 3600
+_lock = asyncio.Lock()
+
+
+async def _is_already_analyzed(member_id: str) -> bool:
+    async with _lock:
+        now = datetime.datetime.now(datetime.timezone.utc).timestamp()
+        if member_id in _recently_analyzed:
+            elapsed = now - _recently_analyzed[member_id]
+            if elapsed < _DEDUP_WINDOW_SECONDS:
+                log.info(f"Skipping duplicate analysis for member {member_id} (analyzed {elapsed:.0f}s ago)")
+                return True
+        _recently_analyzed[member_id] = now
+    return False
 
 
 async def get_user_info(user_id: str) -> MemberInfo:
@@ -178,6 +195,8 @@ async def handle_socket_mode_request(client: SocketModeClient, req: SocketModeRe
     if event.get("type") == "team_join":
         try:
             user_id = event["user"]["id"]
+            if await _is_already_analyzed(user_id):
+                return
             log.info(f"New member joined: {event['user'].get('real_name') or event['user'].get('name')}")
             user_info = await get_user_info(user_id)
             await analyze_and_post_member(user_info)
@@ -189,6 +208,8 @@ async def handle_socket_mode_request(client: SocketModeClient, req: SocketModeRe
             channel_type = event.get("channel_type", "")
             if channel_type in ("C", "G"):
                 user_id = event["user"]
+                if await _is_already_analyzed(user_id):
+                    return
                 log.info(f"Member {user_id} joined channel {event['channel']} ({channel_type})")
                 user_info = await get_user_info(user_id)
                 await analyze_and_post_member(user_info)
