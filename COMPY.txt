@@ -33,12 +33,11 @@ TABLE OF CONTENTS
   a Slack workspace. When someone joins (via team_join or member_joined_channel
   events), the agent:
 
-   1. Fetches their Slack profile (name, email, title, timezone, department,
-      team, phone, display name, status text, skype)
-   2. Performs basic research:
-      - Extracts rich profile fields from Slack
-      - Optionally searches DuckDuckGo for the person's name and title
-   3. Sends the profile + research data to Groq's Llama 3.3 70B model
+  1. Fetches their Slack profile (name, email, title, timezone)
+  2. Performs basic research:
+     - Visits their company website and scrapes the <title>
+     - Searches GitHub for their public profile
+  3. Sends the profile + research data to Groq's Llama 3.3 70B model
   4. The LLM returns a JSON analysis with:
      - fitScore (0-100): How likely they'd be interested in CloudNest Deploy
      - insights: 3-5 key observations
@@ -97,12 +96,12 @@ TABLE OF CONTENTS
               ┌─────────────────┼─────────────────┐
               ▼                 ▼                  ▼
   ┌───────────────────┐ ┌───────────────┐ ┌────────────────┐
-   │  app/research.py  │ │  app/llm.py  │ │ app/database.py│
-   │                   │ │              │ │                │
-   │  1. Extract Slack │ │ 1. Build     │ │ 1. Create      │
-   │     profile fields│ │    prompt    │ │    tables      │
-   │  2. Web search    │ │ 2. Call Groq │ │ 2. Insert      │
-   │     (DuckDuckGo)  │ │    Llama     │ │    analysis    │
+  │  app/research.py  │ │  app/llm.py  │ │ app/database.py│
+  │                   │ │              │ │                │
+  │  1. Get company   │ │ 1. Build     │ │ 1. Create      │
+  │     website info  │ │    prompt    │ │    tables      │
+  │  2. Search GitHub │ │ 2. Call Groq │ │ 2. Insert      │
+  │                   │ │    Llama     │ │    analysis    │
   │  Uses httpx       │ │    3.3 70B   │ │ 3. Update sent │
   └───────────────────┘ │ 3. Parse     │ │    status      │
                          │    JSON      │ └────────────────┘
@@ -140,28 +139,31 @@ TABLE OF CONTENTS
      - Returns: name, email, title, timezone, profile fields
   5. Maps Slack's raw response into a clean Pydantic MemberInfo
 
-   RESEARCH PHASE
-   ─────────────
-   6. do_basic_research(member_info) extracts:
-      - Slack profile fields: department, team, phone, displayName,
-        skype, statusText, timezone
-      - Builds profile insights from available fields
+  RESEARCH PHASE
+  ─────────────
+  6. do_basic_research(member_info) checks:
+     - Does member have a work email (not gmail/yahoo/etc)?
+     - If yes, extract domain from email
 
-   7. Web search (optional):
-      - HTTP GET https://lite.duckduckgo.com/lite/?q={name}+{title}
-      - Returns search results if page is non-empty
-      - Gracefully fails (None) on timeout or error
+  7. get_company_info(domain):
+     - HTTP GET https://www.{domain}
+     - Parse <title> tag with regex
+     - Returns: company name, URL
 
-   8. Research results collected as list[ResearchResult]
-      - type: "profile" for Slack fields, "web_search" for web results
+  8. get_github_info(name):
+     - HTTP GET https://api.github.com/search/users?q={name}
+     - Take first result
+     - Returns: GitHub URL, public repo count
+
+  9. Research results collected as list[ResearchResult]
 
   AI ANALYSIS
   ───────────
   10. analyze_with_ai(member_info, research_data):
       - Builds a ChatPromptTemplate with:
         • Company/Product context
-      • Member details (name, email, title, timezone, profile fields)
-      • Research findings (Slack profile insights + web search)
+        • Member details (name, email, title)
+        • Research findings
       - Chains: prompt | ChatGroq(model="llama-3.3-70b-versatile")
       - Calls llm.ainvoke() with formatted variables
       - Groq returns Llama 3.3 70B's response text
@@ -205,9 +207,9 @@ TABLE OF CONTENTS
 
   ERROR HANDLING
   ──────────────
-   - If any step fails (research, LLM, Slack post), the error is logged
-   - The analysis record remains in DB (if saved before failure)
-   - LLM defaults to fitScore: 50 when data is limited — "unknown" ≠ "bad"
+  - If any step fails (research, LLM, Slack post), the error is logged
+  - The analysis record remains in DB (if saved before failure)
+  - Falls back to default analysis (fitScore: 50, manual review recommended)
   - Graceful shutdown on SIGINT/SIGTERM
 
 ================================================================================
@@ -225,7 +227,7 @@ TABLE OF CONTENTS
   │   ├── schemas.py                # Pydantic request/response schemas
   │   ├── logger.py                 # Logging configuration
   │   ├── llm.py                    # ChatGroq setup + analysis logic
-   │   ├── research.py               # Slack profile fields + web search
+  │   ├── research.py               # Company + GitHub research logic
   │   ├── slack_client.py           # Slack Socket Mode + WebClient
   │   └── routers/                  # FastAPI route handlers
   │       ├── __init__.py           # Package marker (empty)
@@ -334,24 +336,22 @@ TABLE OF CONTENTS
   │ - Parses JSON and returns AnalysisResult with safety defaults          │
   └─────────────────────────────────────────────────────────────────────────┘
 
-   ┌─────────────────────────────────────────────────────────────────────────┐
-   │ app/research.py                                                         │
-   │ Extracts Slack profile fields and optionally searches the web.         │
-   │                                                                         │
-   │ - _get_profile_insights(): Builds insights from Slack profile fields   │
-   │   (department, team, phone, displayName, skype, statusText, timezone)  │
-   │ - _search_web(query): Async DuckDuckGo search via httpx                │
-   │ - do_basic_research(member_info): Orchestrates above functions         │
-   └─────────────────────────────────────────────────────────────────────────┘
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ app/research.py                                                         │
+  │ External research functions using httpx (async HTTP client).           │
+  │                                                                         │
+  │ - is_personal_email(): Filter gmail/yahoo/hotmail/outlook/icloud       │
+  │ - get_company_info(domain): Fetch website, extract <title> tag         │
+  │ - get_github_info(name): Search GitHub users by name                   │
+  │ - do_basic_research(member_info): Orchestrates above functions         │
+  └─────────────────────────────────────────────────────────────────────────┘
 
   ┌─────────────────────────────────────────────────────────────────────────┐
   │ app/slack_client.py                                                     │
   │ Slack integration — both Socket Mode events and Web API calls.         │
   │                                                                         │
   │ - web_client: AsyncWebClient for Slack API calls                       │
-   │ - get_user_info(): users.info API → MemberInfo (with rich profile      │
-   │   fields: firstName, lastName, statusText, displayName, phone,         │
-   │   department, team, skype, title)                                      │
+  │ - get_user_info(): users.info API → MemberInfo                         │
   │ - save_member_analysis(): DB insert                                     │
   │ - mark_as_sent_to_slack(): DB update                                    │
   │ - _build_slack_blocks(): Construct rich Slack message attachments       │
@@ -524,42 +524,44 @@ TABLE OF CONTENTS
   2. Have a new user join the Slack workspace
   3. Bot automatically posts analysis to SLACK_PRIVATE_CHANNEL_ID
 
-   TEST 4: Edge Cases
-   ──────────────────
-   - Personal email (jane@gmail.com) → AI does NOT penalize for this
-   - No email provided → AI uses "Not provided"
-   - No job title → AI infers from context or defaults to score 50
-   - LLM returns bad JSON → Falls back to fitScore=50, manual review
-   - Research endpoint down → Continues with available data
-   - Minimal web presence → AI defaults to score 50 ("unknown" ≠ "bad")
+  TEST 4: Edge Cases
+  ──────────────────
+  - Personal email (jane@gmail.com) → AI uses limited research data
+  - No email provided → AI uses "Not provided"
+  - LLM returns bad JSON → Falls back to fitScore=50, manual review
+  - Research endpoint down → Continues with available data
 
 ================================================================================
 9. RENDER DEPLOYMENT
 ================================================================================
 
-   MANUAL DEPLOYMENT STEPS:
-   ────────────────────────
-   1. Push code to GitHub
-   2. In Render Dashboard → "New +" → "Web Service"
-   3. Connect your repository
-   4. Set:
-      - Name: slack-ai-agent
-      - Runtime: Python 3
-      - Build Command: pip install -r requirements.txt
-      - Start Command: uvicorn app.main:app --host 0.0.0.0 --port $PORT
-   5. Add all environment variables in Render's dashboard
-   6. Deploy (free tier works without credit card)
+  ONE-CLICK DEPLOYMENT:
+  ─────────────────────
+  render.yaml is pre-configured. Push your repo to GitHub and connect to
+  Render. It will auto-detect the Python service.
 
-   IMPORTANT NOTES:
-   - render.yaml was removed — Blueprint deployment requires a credit card
-     even for free tier. Use manual Web Service instead.
-   - Set DATABASE_URL with `connect_args={"ssl": "require"}` in database.py
-     (asyncpg does NOT support `?sslmode=require` query parameter)
-   - Pin Python version in runtime.txt (3.12.0) — Render defaulted to 3.14.3
-     which caused Rust compilation issues for pydantic-core
-   - Unpin package versions in requirements.txt to get pre-built wheels
-     (avoids Rust compilation on Render's read-only filesystem)
-   - The start command uses $PORT which Render sets automatically
+  MANUAL DEPLOYMENT STEPS:
+  ────────────────────────
+  1. Push code to GitHub
+  2. In Render Dashboard → "New +" → "Blueprint"
+  3. Connect your repository
+  4. Render reads render.yaml and creates the service
+  5. Set all environment variables in Render's dashboard
+  6. Deploy
+
+  RENDER CONFIG (render.yaml):
+  ───────────────────────────
+  services:
+    - type: web
+      name: slack-ai-agent
+      runtime: python
+      buildCommand: pip install -r requirements.txt
+      startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+
+  IMPORTANT:
+  - Set all env vars in Render's dashboard (marked sync: false)
+  - Make sure DATABASE_URL has ?sslmode=require for Render's Postgres
+  - The start command uses $PORT which Render sets automatically
 
 ================================================================================
 10. MIGRATION HISTORY (Node.js → Python)
